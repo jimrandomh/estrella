@@ -73,6 +73,7 @@ export interface BuildConfig extends esbuild.BuildOptions {
     config       :Readonly<BuildConfig>,
     changedFiles :string[],
     ctx          :BuildContext,
+    esbuildOptions: any,
   ) => Promise<void>|any
 
   // onEnd is called after esbuild has completed a build
