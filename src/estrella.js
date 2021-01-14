@@ -702,7 +702,7 @@ async function build1(config, ctx) {
           changes.sourceRoot = "."
           changes.sources = v => v && v.map(fn => Path.relative(process.cwd(), fn))
         }
-        patchSourceMap(config.outfileAbs + ".map", changes)
+        //patchSourceMap(config.outfileAbs + ".map", changes)
       }
       let size = 0
       try { size = fs.statSync(config.outfileAbs).size } catch(_) {}
