@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash
 #
 # usage: test.sh [-debug] [<testdir> ...]
 #
@@ -7,6 +7,7 @@
 #   If set to any value, some tests will log details
 #
 cd "$(dirname "$0")/.."
+set -e
 
 DEBUG=false
 ESTRELLA_BUILD_ARGS=()
@@ -59,10 +60,14 @@ if ! $BUILD_OK; then
 fi
 
 
-function fn_test_example {
-  d=$1
+fn_test_example() {
+  local d=$1
   echo "———————————————————————————————————————————————————————————————————————"
   echo "$d"
+  if [ -f "$d/NO_TEST" ]; then
+    echo "SKIP (found a NO_TEST file)"
+    return 0
+  fi
   pushd "$d" >/dev/null
 
   # link local debug version of estrella into node_modules
@@ -78,12 +83,18 @@ function fn_test_example {
 
   # build example, assuming ./out is the product output directory
   rm -rf out
-  ./build.js "${ESTRELLA_BUILD_ARGS[@]}"
+  if ! ./build.js "${ESTRELLA_BUILD_ARGS[@]}"; then
+    echo "FAIL $PWD/build.js ${ESTRELLA_BUILD_ARGS[@]}" >&2
+    return 1
+  fi
 
   # assume first js file in out/*.js is the build product
   for f in out/*.js; do
     if [ -f "$f" ]; then
-      node "$f"
+      if ! node "$f"; then
+        echo "FAIL node $PWD/$f" >&2
+        return 1
+      fi
     fi
     break
   done
@@ -96,18 +107,12 @@ function fn_test_example {
   #   echo "Can not find outfile for example $PWD" >&2
   # fi
 
+  echo "PASS"
   popd >/dev/null
 }
 
-FAILED=true
-function _atexit {
-  if $FAILED; then
-    echo "FAIL" >&2
-  fi
-}
-trap _atexit EXIT
+# ^C to stop rather than break current loop
 trap exit SIGINT
-
 
 if [ $# -gt 0 ]; then
   # only run tests provided as dirnames to argv
@@ -124,39 +129,29 @@ if [ $# -gt 0 ]; then
       "$d/test.sh"
     fi
   done
-  exit 0
-fi
-
-
-# run all tests
-
-for d in test/*; do
-  if [ -d "$d" ] && [[ "$d" != "."* ]]; then
-    if [ -f "$d/test.sh" ]; then
+else
+  # run all tests and examples
+  for d in test/*; do
+    if [ -d "$d" ] && [[ "$d" != "."* ]]; then
       echo "———————————————————————————————————————————————————————————————————————"
       echo "$d"
-      "$d/test.sh"
-    else
-      echo "$0: $d/test.sh not found -- ignoring" >&2
+      if [ -f "$d/test.sh" ]; then
+        if "$d/test.sh"; then
+          echo "PASS"
+        else
+          echo "FAIL $d" >&2
+          exit 1
+        fi
+      else
+        echo "SKIP (no test.sh file)"
+      fi
     fi
-  fi
-done
+  done
+  for d in examples/*; do
+    if [ -d "$d" ] && [[ "$d" != "."* ]]; then
+      fn_test_example "$d"
+    fi
+  done
+fi
 
-for d in examples/*; do
-  if [ -d "$d" ] && [[ "$d" != "."* ]]; then
-    fn_test_example "$d"
-  fi
-done
-
-
-# # build examples/minimal using the direct CLI
-# # TODO: move into test dir (like test/types)
-# echo "———————————————————————————————————————————————————————————————————————"
-# echo ">>> direct cli build of examples/minimal"
-# pushd examples/minimal >/dev/null
-# ./node_modules/estrella "${ESTRELLA_BUILD_ARGS[@]}" -o out/main.js main.ts
-# node out/main.js
-# popd >/dev/null
-
-FAILED=false
 echo "ALL PASS OK"

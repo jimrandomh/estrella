@@ -19,6 +19,7 @@ import {
   runtimeRequire,
   tildePath,
   tmpdir,
+  isCLI,
 } from "./util"
 import { termStyle, stdoutStyle as style, stderrStyle } from "./termstyle"
 import { memoize, isMemoized } from "./memoize"
@@ -35,7 +36,7 @@ import { chmod } from "./chmod"
 import * as typeinfo from "./typeinfo"
 import { createBuildConfig } from "./config"
 import { sha1 } from "./hash"
-import * as aux from "./aux"
+import * as extra from "./extra"
 
 const { dirname, basename } = Path
 
@@ -69,6 +70,8 @@ const CLI_DOC_STANDALONE = {
     ["-esbuild"    ,"Pass arbitrary JSON to esbuild's build function.", "<json>"],
   ]),
   trailer: `
+<srcfile> is a filename, or "-" for stdin.
+
 Example of using estrella without a build script:
   $0 -o out/app.js main.ts
     This compile main.ts and writes the output to out/app.js
@@ -143,7 +146,7 @@ function processAPIConfig(config) {
     }
   }
   delete config.entry
-  if (config.entryPoints.length == 0) {
+  if (config.entryPoints.length == 0 && !config.stdin) {
     // No entryPoints provided. Try to read from tsconfig include or files
     log.debug(()=> `missing entryPoints; attempting inference`)
     config.entryPoints = guessEntryPoints(config)
@@ -315,7 +318,7 @@ function build(config /* estrella.BuildConfig */) {
       if (reason) {
         resolver.reject(reason)
       } else {
-        resolver.resolve()
+        resolver.resolve(true)
       }
     }
   }
@@ -379,36 +382,57 @@ async function build1(config, ctx) {
     // BEGIN special logic for when running this script directly as a program
 
     if (args.length == 0) {
-      // no <srcfile>'s provided -- try to read tsconfig file in current directory
-      const guess = guessEntryPoints(config)
-      log.debug(() => `no input files provided; best guess: ${repr(guess)}`)
-      if (guess.length == 0) {
-        log.error(`missing <srcfile> argument (see ${prog} -help)`)
-        process.exit(1)
-      }
-
-      args.splice(args.length-1, 0, ...guess)
-
-      // infer outfile or outdir
-      const tsconfig = tsutil.getTSConfigForConfig(config)
-      if (!opts.outfile && !opts.outdir && tsconfig) {
-        opts.outfile = tsconfig.outFile
-        if (!opts.outfile) {
-          opts.outdir = tsconfig.outDir
+      // no <srcfile>'s provided, default to stdin unless its a TTY,
+      // else try to read tsconfig file in current directory.
+      if (!process.stdin.isTTY) {
+        args = ["-"]
+      } else {
+        const guess = guessEntryPoints(config)
+        log.debug(() => `no input files provided; best guess: ${repr(guess)}`)
+        if (guess.length == 0) {
+          log.error(`missing <srcfile> argument (see ${prog} -help)`)
+          process.exit(1)
         }
-      }
 
-      if (args.length == 0) {
-        log.error(`missing <srcfile> argument (see ${prog} -help)`)
-        process.exit(1)
+        args.splice(args.length-1, 0, ...guess)
+
+        // infer outfile or outdir
+        const tsconfig = tsutil.getTSConfigForConfig(config)
+        if (!opts.outfile && !opts.outdir && tsconfig) {
+          opts.outfile = tsconfig.outFile
+          if (!opts.outfile) {
+            opts.outdir = tsconfig.outDir
+          }
+        }
+
+        if (args.length == 0) {
+          log.error(`missing <srcfile> argument (see ${prog} -help)`)
+          process.exit(1)
+        }
       }
     }
 
+    // handle stdin args ("-")
+    args = args.filter(a => {
+      if (a != "-") {
+        return true
+      }
+      if (!config.stdin) { // guard to deduplicate multiple "-" args
+        config.stdin = {
+          contents: fs.readFileSync(/*STDIN_FILENO*/0, "utf8"),
+          sourcefile: "stdin",
+          resolveDir: process.cwd(),
+          loader: 'ts', // TODO make user-configurable on the CLI
+        }
+      }
+      return false
+    })
+
     config.setOutfile(opts.outfile || undefined)
-    config.entryPoints = args
-    config.outdir = opts.outdir || undefined
-    config.bundle = opts.bundle || undefined
-    config.minify = opts.minify || undefined
+    args.length > 0 && (config.entryPoints = args)
+    opts.outdir     && (config.outdir = opts.outdir)
+    opts.bundle     && (config.bundle = opts.bundle)
+    opts.minify     && (config.minify = opts.minify)
 
     if (opts.esbuild) {
       const esbuildProps = jsonparse(opts.esbuild, "-esbuild")
@@ -442,7 +466,8 @@ async function build1(config, ctx) {
     stderrStyle.reconfigure(process.stderr, config.color)
   }
 
-  if (quiet) {
+  if (quiet && log.level < log.DEBUG) {
+    // when -quiet or -silent is set but -estrella-debug is NOT set, then reduce log verbosity
     log.level = silent ? log.SILENT : log.WARN
   }
 
@@ -478,7 +503,10 @@ async function build1(config, ctx) {
     opts.diag === false ? "off" :
     "auto"
   )
-  if (tslintOptions !== "off") {
+  if (tslintOptions !== "off" && (!config.entryPoints || config.entryPoints.length == 0)) {
+    log.debug(`disabling tslint (no entryPoints)`)
+    tslintOptions = "off"
+  } else if (tslintOptions !== "off") {
     if (config.tsc !== undefined) {
       log.info("the 'tsc' property is deprecated. Please rename to 'tslint'.")
       if (config.tslint === undefined) {
@@ -627,45 +655,66 @@ async function build1(config, ctx) {
 
   // definitions
   let define = {
-    DEBUG: debug,
+    DEBUG: debug ? "true" : "false",
     ...(config.define || {})
   }
-  //for (let k in define) {
-  //  define[k] = json(define[k])
-  //}
 
   // options to esbuild
   const esbuildOptions = {
+    // default values
     minify: !debug,
     sourcemap: config.sourcemap,
+    sourcesContent: false, // to match past versions of estrella
     color: stderrStyle.ncolors > 0,
-    logLevel: config.silent ? "silent" : config.quiet ? "warning" : "info",
+    logLevel: (
+      log.level == log.DEBUG ? "info" :
+      config.silent ?          "silent" :
+      config.quiet ?           "error" :
+                               "warning" ),
 
+    // user values
     ...esbuildOptionsFromConfig(config),
 
     define,
+  }
+
+  // Incremental rebuild is available if the folllowing test passes:
+  //   (esbuildResult && esbuildResult.rebuild)
+  // This must be set to null whenever esbuildConfig changes.
+  let esbuildResult = null // : esbuild.BuildIncremental
+
+  let lastBuildResults = {
+    warnings: [],
+    errors: [],
+    metafile: null, //{inputs:{},outputs:{}}|null
   }
 
   // esbuild can produce a metadata file describing imports
   // We use this to know what source files to observe in watch mode.
   if (config.watch) {
     const projectID = config.projectID
+    esbuildOptions.incremental = true
+    esbuildOptions.metafile = true
     if ((!esbuildOptions.outfile && !esbuildOptions.outdir) || esbuildOptions.write === false) {
       // esbuild needs an outfile for the metafile option to work
       esbuildOptions.outfile = Path.join(tmpdir(), `esbuild.${projectID}.out.js`)
-      esbuildOptions.metafile = Path.join(tmpdir(), `esbuild.${projectID}.meta.json`)
       config.outfileIsTemporary = true
-      config.metafileIsTemporary = true
       // if write==false, unset it so that esbuild actually writes metafile
       delete esbuildOptions.write
-    } else if (!esbuildOptions.metafile) {
-      const outdir = esbuildOptions.outdir || Path.dirname(esbuildOptions.outfile)
-      esbuildOptions.metafile = Path.resolve(config.cwd, outdir, `.esbuild.${projectID}.meta.json`)
-      config.metafileIsTemporary = true
     }
-  }
-  if (esbuildOptions.metafile) {
-    log.debug(()=> `writing esbuild meta to ${esbuildOptions.metafile}`)
+    // cancel incremental esbuild when BuildProcess.cancel is called
+    ctx.addCancelCallback(() => {
+      if (esbuildResult && esbuildResult.rebuild) {
+        esbuildResult.rebuild.dispose()
+      }
+    });
+    // setup metafile.inputs for initial run so that watch has some files
+    if (config.entryPoints && config.entryPoints.length > 0) {
+      lastBuildResults.metafile = {inputs:{},outputs:{}}
+      for (let f of config.entryPoints) {
+        lastBuildResults.metafile.inputs[f] = {}
+      }
+    }
   }
 
   // rebuild function
@@ -678,10 +727,10 @@ async function build1(config, ctx) {
     })
   }
 
-  let lastBuildResults = { warnings: [], errors: [] }
-
-  function onBuildSuccess(timeStart, { warnings }) {
-    logWarnings(warnings || [])
+  function onBuildSuccess(timeStart, result/*esbuild.BuildResult*/) {
+    log.debug("esbuild finished with result", result)
+    esbuildResult = result
+    logWarnings(result.warnings || [])
     const time = fmtDuration(clock() - timeStart)
     if (!config.outfile) {
       log.info(style.green(
@@ -690,19 +739,15 @@ async function build1(config, ctx) {
       ))
     } else {
       let outname = config.outfile
-      if (config.sourcemap && config.sourcemap != "inline" && config.write !== false) {
-        const ext = Path.extname(config.outfile)
-        const name = Path.join(Path.dirname(config.outfile), Path.basename(config.outfile, ext))
-        outname = `${name}.{${ext.substr(1)},${ext.substr(1)}.map}`
-        const changes = {
-          sourcesContent: undefined,
-          sourceRoot: Path.relative(Path.dirname(config.outfile), config.cwd),
-        }
-        if (config.outfileIsTemporary) {
-          changes.sourceRoot = "."
-          changes.sources = v => v && v.map(fn => Path.relative(process.cwd(), fn))
-        }
-        //patchSourceMap(config.outfileAbs + ".map", changes)
+      if (config.sourcemap &&
+          config.outfileIsTemporary &&
+          config.sourcemap != "inline" &&
+          config.write !== false )
+      {
+        // repair "sources" filenames in sourcemap
+        patchSourceMap(config.outfileAbs + ".map", {
+          sources: v => v && v.map(fn => Path.relative(config.cwd, fn)),
+        })
       }
       let size = 0
       try { size = fs.statSync(config.outfileAbs).size } catch(_) {}
@@ -710,19 +755,23 @@ async function build1(config, ctx) {
         log.info(style.green(`Wrote ${outname}`) + ` (${fmtByteSize(size)}, ${time})`)
       }
     }
-    lastBuildResults = { warnings, errors: [] }
+    lastBuildResults.warnings = result.warnings
+    lastBuildResults.errors = []
+    lastBuildResults.metafile = result.metafile || null
     return onEnd(lastBuildResults, true)
   }
 
-  function onBuildFail(timeStart, err, options) {
+  let isInitialBuild = true  // TODO better name and documentation
+
+  function onBuildFail(timeStart, err) {
+    log.debug("esbuild finished with error:", err ? err.stack || err : null)
     let warnings = err.warnings || []
     let errors = err.errors || []
-    let showStackTrace = options && options.showStackTrace
     if (errors.length == 0) {
       // in this case the err is an Error object and describes the error
       log.error(err.message)
       errors.push({
-        text: String(showStackTrace && err.stack ? err.stack : err),
+        text: String(err),
         location: null,
       })
     }
@@ -731,14 +780,38 @@ async function build1(config, ctx) {
     //   if (!config) { process.exit(1) }
     // }
     logWarnings(warnings)
-    lastBuildResults = { warnings, errors }
+    lastBuildResults.warnings = warnings
+    lastBuildResults.errors = errors
+    if (!isInitialBuild) {
+      lastBuildResults.metafile = null
+    } else {
+      isInitialBuild = false
+    }
     return onEnd(lastBuildResults, false)
   }
 
   // build function
-  async function _esbuild(changedFiles /*:string[]*/) {
+  async function _esbuild(fileEvents /*:FileEvent[]*/) {
     if (config.watch && config.clear) {
       clear()
+    }
+
+    // build list of changed filenames and check for entryPoint renames
+    let changedFiles = [] // :string[]
+    for (let f of fileEvents) {
+      if (f.type == "move") {
+        // renamed file: check entryPoints
+        const i = config.entryPoints ? config.entryPoints.indexOf(f.name) : -1
+        if (i != -1) {
+          log.debug("detected entryPoint file rename", f.name, "->", f.newname)
+          config.entryPoints[i] = f.newname
+          esbuildOptions.entryPoints[i] = f.newname
+          esbuildResult = null // invalidate incremental esbuild (since config changed)
+        }
+        changedFiles.push(f.newname)
+      } else {
+        changedFiles.push(f.name)
+      }
     }
 
     if (config.onStart) {
@@ -758,16 +831,21 @@ async function build1(config, ctx) {
       return
     }
 
+    const rebuild = !!(esbuildResult && esbuildResult.rebuild)
+
     log.debug(()=>
-      `invoking esbuild.build() in ${process.cwd()} with options: ` +
-      `${repr(esbuildOptions)}`
+      `invoking ${rebuild ? "esbuildResult.rebuild" : "esbuild.build"} ` +
+      `in ${process.cwd()} with options: ${repr(esbuildOptions)}`
     )
 
     // wrap call to esbuild.build in a temporarily-changed working directory.
     // TODO: When/if esbuild adds an option to set cwd, use that instead.
     const tmpcwd = process.cwd()
     process.chdir(config.cwd)
-    const esbuildPromise = esbuild.build(esbuildOptions)
+    const esbuildPromise = (
+      rebuild ? esbuildResult.rebuild() :
+                esbuild.build(esbuildOptions)
+    )
     process.chdir(tmpcwd)
 
     return esbuildPromise.then(
@@ -810,31 +888,18 @@ async function build1(config, ctx) {
 
   // watch mode?
   if (config.watch) {
-    // keep a copy of the last metadata around in case of read failure (return old data)
-    let esbuildMeta = {}
     function getESBuildMeta() { // :Object|null
-      try {
-        esbuildMeta = jsonparseFile(esbuildOptions.metafile)
-        // note: intentionally leave the file in case of an exception in jsonparseFile
-        if (config.metafileIsTemporary) {
-          log.debug(()=>`removing temporary esbuild metafile ${esbuildOptions.metafile}`)
-          fs.unlink(esbuildOptions.metafile, ()=>{})
-        }
-      } catch (err) {
-        // ignore error if last build failed (and return past metadata)
-        if (lastBuildResults.errors.length == 0) {
-          throw err
-        }
-      }
-      return esbuildMeta
+      return lastBuildResults.metafile
     }
-    await aux.watch().watchFiles(config, getESBuildMeta, ctx, changedFiles => {
+    await extra.watch().watchFiles(config, getESBuildMeta, ctx, fileEvents => {
       // This function is invoked whenever source files changed.
       // Note that the watchFiles() function takes care of updating source file tracking.
-      const filenames = changedFiles.map(f => Path.relative(config.cwd, f))
-      const n = changedFiles.length
-      log.info(`${n} ${n > 1 ? "files" : "file"} changed: ${filenames.join(", ")}`)
-      return _esbuild(changedFiles)
+      const n = fileEvents.length
+      const fv = fileEvents.map(f =>
+        f.type == "move" ? f.newname :
+                           f.name )
+      log.info(`${n} ${n > 1 ? "files" : "file"} changed: ${fv.join(", ")}`)
+      return _esbuild(fileEvents)
     })
     log.debug("fswatch ended")
     return true
@@ -906,6 +971,10 @@ function startTSLint(tslintOptions, cliopts, config) { // : [tslintProcess, tsli
     return [existingTSLintProcess, true]
   }
 
+  const srcdir = (
+    config.entryPoints && config.entryPoints.length > 0 ? dirname(config.entryPoints[0]) :
+                                                          config.cwd )
+
   const options = {
     colors: style.ncolors > 0,
     quiet: config.quiet,
@@ -916,7 +985,7 @@ function startTSLint(tslintOptions, cliopts, config) { // : [tslintProcess, tsli
     watch: config.watch,
     cwd: config.cwd,
     clearScreen,
-    srcdir: dirname(config.entryPoints[0]),
+    srcdir,
     tsconfigFile,
     onRestart() {
       log.debug("tsc restarting")
@@ -1016,11 +1085,7 @@ function postProcessCLIOpts() {
   log.debug(()=> `Parsed initial CLI arguments: ${repr({options:cliopts, args:cliargs},2)}`)
 }
 
-if (
-  module.id == "." ||
-  process.mainModule && basename(process.mainModule.filename||"")
-  == (DEBUG ? "estrella.g.js" : "estrella.js")
-) {
+if (isCLI) {
   // Note: esbuild replaces the module object, so when running from a esbuild bundle,
   // module.id is undefined.
   ;[cliopts, cliargs] = cli.parseopt(process.argv.slice(2), CLI_DOC_STANDALONE)
@@ -1084,7 +1149,7 @@ if (
 
 
 function watch(path, options, cb) {
-  return aux.watch().watch(path, options, cb)
+  return extra.watch().watch(path, options, cb)
 }
 
 
