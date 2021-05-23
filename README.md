@@ -27,7 +27,7 @@ to your package.json file. Instead, Estrella recognizes & embraces the fact that
 have unique build requirements. You run Estrella from a script (instead of Estrella running a
 script or config file.) Essentially you create a "build.js",
 or lolcat.js—name it whatever you want—script in which you invoke estrella. This turns your script
-into a fully-features CLI program with access to a
+into a fully-featured CLI program with access to a
 [rich API exposed by the estrella module](estrella.d.ts).
 
 
@@ -60,7 +60,7 @@ And that's it for basic use.
 [See the `examples` directory](examples) for more examples
 which you can use as templates for new projects.
 
-See [evanw/esbuild/lib/types.ts](https://github.com/evanw/esbuild/blob/master/lib/types.ts)
+See [evanw/esbuild/lib/shared/types.ts](https://github.com/evanw/esbuild/blob/master/lib/shared/types.ts)
 for documentation of esbuild options.
 
 
@@ -148,6 +148,16 @@ maps TS diagnostic codes to:
 Too list predefined tsrules, run: `node -p 'require("estrella").defaultTSRules'`.
 Rules which you provide take precedence, so if there are any predefined rules you'd
 like to change, simply set those in your `tsrules` object.
+
+In case you need to disable TypeScript diagnostics for a project with a tsconfig.json
+file, you can set `tslint:false` in your build config:
+
+```js
+build({
+  // your regular options ...
+  tslint: false,
+})
+```
 
 
 ## Examples and feature documentation

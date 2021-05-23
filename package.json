@@ -1,6 +1,6 @@
 {
   "name": "estrella",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Versatile build tool based on the esbuild compiler",
   "main": "dist/estrella.js",
   "bin": {
@@ -20,14 +20,12 @@
     "dist/debug.js.map",
     "dist/watch.js",
     "dist/watch.js.map",
-    "dist/npm-postinstall.js",
     ".gitignore"
   ],
   "scripts": {
     "build": "node build.js",
     "build-rescue": "bash misc/rescue.sh",
-    "test": "bash test/test.sh",
-    "postinstall": "node dist/npm-postinstall.js"
+    "test": "bash test/test.sh"
   },
   "author": "Rasmus Andersson <rsms.me>",
   "license": "ISC",
@@ -39,7 +37,7 @@
     "node": ">=12.0.0"
   },
   "dependencies": {
-    "esbuild": "^0.9.0"
+    "esbuild": "^0.11.0"
   },
   "optionalDependencies": {
     "fsevents": "~2.3.1"
