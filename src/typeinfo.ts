@@ -68,7 +68,7 @@ export const estrella = {
     "silent"      , // boolean
     "clear"       , // boolean
     "tslint"      , // boolean | "auto" | "on" | "off" | TSLintBasicOptions
-    "onStart"     , // (config: Readonly<BuildConfig>, changedFiles: string[], ctx: BuildContext) => Promise<void> | any
+    "onStart"     , // (config: Readonly<BuildConfig>, changedFiles: string[], ctx: BuildContext, esbuildOptions: any) => Promise<void> | any
     "onEnd"       , // (config: Readonly<BuildConfig>, buildResult: BuildResult, ctx: BuildContext) => Promise<void> | any
     "outfileMode" , // number | string | string[]
     "run"         , // boolean | string | string[]

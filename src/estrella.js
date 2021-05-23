@@ -865,7 +865,7 @@ async function build1(config, ctx) {
 
     if (config.onStart) {
       try {
-        const r = config.onStart(config, changedFiles, ctx)
+        const r = config.onStart(config, changedFiles, ctx, esbuildOptions)
         if (r instanceof Promise) {
           await r
         }
